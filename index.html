@@ -169,9 +169,10 @@
   }
 
   // mountain ridges — must start AND end at y=yBase so the silhouette is continuous
-  // across the WORLD_W → 0 seam. Returns the sample-point array so we can later test
-  // whether a reticle position is actually on the silhouette (vs. sky between peaks).
-  const ridgeLayer = (yBase, amp, step, fill, opacity) => {
+  // across the WORLD_W → 0 seam. Splitting generation from drawing lets us splice
+  // fixed features (see FIXED_PEAK below) into the profile before rendering, so the
+  // drawn silhouette and the distance-detection logic stay in sync from one source.
+  const generateRidgePts = (yBase, amp, step) => {
     const pts = [{ x: 0, y: yBase }];
     let x = step * rand(0.6, 1.4);
     while (x < WORLD_W - step * 1.5) {
@@ -179,21 +180,63 @@
       x += step * rand(0.6, 1.4);
     }
     pts.push({ x: WORLD_W, y: yBase });
-
+    return pts;
+  };
+  const drawRidge = (pts, fill, opacity) => {
     let d = `M 0 ${VIEW_H}`;
     for (const p of pts) d += ` L ${p.x.toFixed(1)} ${p.y.toFixed(1)}`;
     d += ` L ${WORLD_W} ${VIEW_H} Z`;
-
     const path = document.createElementNS(NS, 'path');
     path.setAttribute('d', d);
     path.setAttribute('fill', fill);
     path.setAttribute('opacity', opacity);
     worldContent.appendChild(path);
-    return pts;
   };
-  const farProfile  = ridgeLayer(VIEW_H * 0.55, 80, 90, '#1a3a52', 0.55);
-  const midProfile  = ridgeLayer(VIEW_H * 0.65, 60, 70, '#142a3a', 0.7);
-  const nearProfile = ridgeLayer(VIEW_H * 0.75, 40, 50, '#0d1a26', 0.9);
+
+  const farProfile  = generateRidgePts(VIEW_H * 0.55, 80, 90);
+  const midProfile  = generateRidgePts(VIEW_H * 0.65, 60, 70);
+  const nearProfile = generateRidgePts(VIEW_H * 0.75, 40, 50);
+
+  // ---- fixed M-shaped peak on the far ridge ---------------------------------
+  // Five silhouette points: two base anchors that merge into the far ridge mean,
+  // two peak summits joined by a short steep "outer stroke" giving the near-
+  // vertical sides, and a central notch — the V between the summits is what makes
+  // it read as an M. The whole thing is hardcoded — same X, Y, height every load —
+  // and gets a fixed distance that the readout will show when the reticle is on it.
+  const FIXED_PEAK = {
+    centerX:   4000,                // never moves
+    halfWidth: 40,                  // total base width = 80
+    baseY:     VIEW_H * 0.55,       // matches far-ridge mean so the merge is invisible
+    topY:      200,                 // summit y (lower number = taller peak)
+    notchY:    320,                 // central V vertex
+    stroke:    12,                  // x-width of the steep outer side
+    distance:  7777,                // fixed readout — no jitter
+  };
+  const _p = FIXED_PEAK;
+  const fixedPeakProfile = [
+    { x: _p.centerX - _p.halfWidth,             y: _p.baseY  },  // base left
+    { x: _p.centerX - _p.halfWidth + _p.stroke, y: _p.topY   },  // top of left peak
+    { x: _p.centerX,                             y: _p.notchY },  // notch (the M's V)
+    { x: _p.centerX + _p.halfWidth - _p.stroke, y: _p.topY   },  // top of right peak
+    { x: _p.centerX + _p.halfWidth,             y: _p.baseY  },  // base right
+  ];
+  // Splice the M's points into farProfile: drop any random points whose x falls
+  // inside the peak's footprint, then insert the M's profile at the right index.
+  // The result is a single sorted profile that includes both random and fixed pts.
+  {
+    const left  = _p.centerX - _p.halfWidth;
+    const right = _p.centerX + _p.halfWidth;
+    const kept = farProfile.filter(p => p.x < left || p.x > right);
+    let i = 0;
+    while (i < kept.length && kept[i].x < left) i++;
+    kept.splice(i, 0, ...fixedPeakProfile);
+    farProfile.length = 0;
+    farProfile.push(...kept);
+  }
+
+  drawRidge(farProfile,  '#1a3a52', 0.55);
+  drawRidge(midProfile,  '#142a3a', 0.7);
+  drawRidge(nearProfile, '#0d1a26', 0.9);
 
   // scattered features. cx stays inside [SEAM_MARGIN, WORLD_W - SEAM_MARGIN] and each
   // shape's footprint is bounded so nothing crosses the seam.
@@ -320,17 +363,31 @@
   };
 
   const GROUND_Y = 850;  // bottom strip is foreground/ground — silent
-  const jitter = (wx, base) =>
-    Math.round(Math.sin(wx * 0.0007 + base * 0.001) * 25);
 
+  // distanceAt returns the *flat* base distance for whatever the reticle is on,
+  // or null for sky/ground. Per-reading jitter is added at the readout layer so
+  // that every non-null reading (including the fixed M-peak) flickers slightly.
   const distanceAt = (wx, wy) => {
     if (wy >= GROUND_Y) return null;
     // check nearest first; nearest ridge occludes farther ones.
-    if (wy >= ridgeYAt(nearProfile, wx)) return 1500 + jitter(wx, 1500);
-    if (wy >= ridgeYAt(midProfile,  wx)) return 3200 + jitter(wx, 3200);
-    if (wy >= ridgeYAt(farProfile,  wx)) return 5400 + jitter(wx, 5400);
+    if (wy >= ridgeYAt(nearProfile, wx)) return 1500;
+    if (wy >= ridgeYAt(midProfile,  wx)) return 3200;
+    if (wy >= ridgeYAt(farProfile,  wx)) {
+      // We're on the far ridge's silhouette. The M-peak's points live in farProfile
+      // already, so ridgeYAt above correctly returns the M's outline in this x range
+      // — including the notch, which produces sky between the twin summits.
+      const inPeak = wx >= _p.centerX - _p.halfWidth
+                  && wx <= _p.centerX + _p.halfWidth;
+      return inPeak ? _p.distance : 5400;
+    }
     return null;  // sky (above all ridges OR between peaks of the nearest occluder)
   };
+
+  // Rangefinder noise: a small, deterministic per-(x, y, base) offset so any motion
+  // of the reticle — panning OR aiming — makes the digits twitch like a live
+  // instrument, even within a flat distance band. Stable for any given (x, y).
+  const jitter = (wx, wy, base) =>
+    Math.round(Math.sin(wx * 0.0007 + wy * 0.0013 + base * 0.001) * 25);
 
   // -------- two stamps of the world side by side, wrapped in a translatable group --------
   const worldWrap = document.createElementNS(NS, 'g');
@@ -394,7 +451,8 @@
       valueEl.textContent = '----';
       displayEl.classList.add('no-signal');
     } else {
-      valueEl.textContent = String(d).padStart(4, '0');
+      const reading = d + jitter(reticleWorldX, reticleWorldY, d);
+      valueEl.textContent = String(reading).padStart(4, '0');
       displayEl.classList.remove('no-signal');
     }
 
