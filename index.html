@@ -169,26 +169,31 @@
   }
 
   // mountain ridges — must start AND end at y=yBase so the silhouette is continuous
-  // across the WORLD_W → 0 seam.
+  // across the WORLD_W → 0 seam. Returns the sample-point array so we can later test
+  // whether a reticle position is actually on the silhouette (vs. sky between peaks).
   const ridgeLayer = (yBase, amp, step, fill, opacity) => {
-    let d = `M 0 ${VIEW_H} L 0 ${yBase}`;
+    const pts = [{ x: 0, y: yBase }];
     let x = step * rand(0.6, 1.4);
     while (x < WORLD_W - step * 1.5) {
-      const ny = yBase + rand(-amp, amp);
-      d += ` L ${x.toFixed(1)} ${ny.toFixed(1)}`;
+      pts.push({ x, y: yBase + rand(-amp, amp) });
       x += step * rand(0.6, 1.4);
     }
-    // anchor the right edge at the same yBase as the left edge
-    d += ` L ${WORLD_W} ${yBase} L ${WORLD_W} ${VIEW_H} Z`;
+    pts.push({ x: WORLD_W, y: yBase });
+
+    let d = `M 0 ${VIEW_H}`;
+    for (const p of pts) d += ` L ${p.x.toFixed(1)} ${p.y.toFixed(1)}`;
+    d += ` L ${WORLD_W} ${VIEW_H} Z`;
+
     const path = document.createElementNS(NS, 'path');
     path.setAttribute('d', d);
     path.setAttribute('fill', fill);
     path.setAttribute('opacity', opacity);
     worldContent.appendChild(path);
+    return pts;
   };
-  ridgeLayer(VIEW_H * 0.55, 80, 90, '#1a3a52', 0.55);
-  ridgeLayer(VIEW_H * 0.65, 60, 70, '#142a3a', 0.7);
-  ridgeLayer(VIEW_H * 0.75, 40, 50, '#0d1a26', 0.9);
+  const farProfile  = ridgeLayer(VIEW_H * 0.55, 80, 90, '#1a3a52', 0.55);
+  const midProfile  = ridgeLayer(VIEW_H * 0.65, 60, 70, '#142a3a', 0.7);
+  const nearProfile = ridgeLayer(VIEW_H * 0.75, 40, 50, '#0d1a26', 0.9);
 
   // scattered features. cx stays inside [SEAM_MARGIN, WORLD_W - SEAM_MARGIN] and each
   // shape's footprint is bounded so nothing crosses the seam.
@@ -295,24 +300,36 @@
     worldContent.appendChild(t);
   }
 
-  // -------- distance bands: each of the 3 mountain layers reads roughly its own value --------
-  // Y thresholds align with the ridge yBase values (495/585/675) and amplitudes used above.
-  // Sky (above the farthest ridge) and ground (below the closest ridge's main body) are silent.
-  const LAYERS = [
-    { yMin: 410, yMax: 555, base: 5400 },  // far ridge
-    { yMin: 555, yMax: 645, base: 3200 },  // mid ridge
-    { yMin: 645, yMax: 780, base: 1500 },  // near ridge
-  ];
+  // -------- distance lookup: actually consult ridge geometry, not just y-bands --------
+  // Each ridge is a fill from its profile down to VIEW_H. From the camera's POV, at any
+  // (wx, wy) the nearest ridge whose silhouette covers wy is what's visible. Between
+  // peaks of an otherwise-occluding ridge, the silhouette dips and sky (or a more
+  // distant ridge) shows through — so we must check the actual ridge-y at this wx.
+  //
+  // Interpolate the ridge's y at world-x = wx using the stored sample points.
+  // Profiles start at x=0 and end at x=WORLD_W with monotonically increasing x.
+  const ridgeYAt = (pts, wx) => {
+    let lo = 0, hi = pts.length - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (pts[mid].x <= wx) lo = mid; else hi = mid;
+    }
+    const a = pts[lo], b = pts[hi];
+    const t = (wx - a.x) / (b.x - a.x);
+    return a.y + (b.y - a.y) * t;
+  };
+
+  const GROUND_Y = 850;  // bottom strip is foreground/ground — silent
+  const jitter = (wx, base) =>
+    Math.round(Math.sin(wx * 0.0007 + base * 0.001) * 25);
 
   const distanceAt = (wx, wy) => {
-    for (const L of LAYERS) {
-      if (wy >= L.yMin && wy < L.yMax) {
-        // tiny per-X variation so it feels like a live rangefinder, not a static label.
-        const jitter = Math.round(Math.sin(wx * 0.0007 + L.base * 0.001) * 25);
-        return L.base + jitter;
-      }
-    }
-    return null;
+    if (wy >= GROUND_Y) return null;
+    // check nearest first; nearest ridge occludes farther ones.
+    if (wy >= ridgeYAt(nearProfile, wx)) return 1500 + jitter(wx, 1500);
+    if (wy >= ridgeYAt(midProfile,  wx)) return 3200 + jitter(wx, 3200);
+    if (wy >= ridgeYAt(farProfile,  wx)) return 5400 + jitter(wx, 5400);
+    return null;  // sky (above all ridges OR between peaks of the nearest occluder)
   };
 
   // -------- two stamps of the world side by side, wrapped in a translatable group --------
