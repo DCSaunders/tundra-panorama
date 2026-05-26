@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>tundra panorama</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #0a0d12;
+    color: #cbd2dc;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    overflow: hidden;
+  }
+  #viewscreen {
+    width: 100vw;
+    height: 100vh;
+    display: block;
+  }
+  #hud {
+    position: fixed;
+    left: 12px;
+    bottom: 10px;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #5b6573;
+    user-select: none;
+    pointer-events: none;
+  }
+  #hud b {
+    color: #8b95a3;
+    font-weight: 500;
+  }
+</style>
+</head>
+<body>
+<svg id="viewscreen" xmlns="http://www.w3.org/2000/svg"
+     preserveAspectRatio="xMidYMid slice"
+     viewBox="0 0 1600 900"></svg>
+<div id="hud"><b>&larr; &rarr;</b> scroll &nbsp;&nbsp; <span id="pos">x=0</span></div>
+
+<script>
+(() => {
+  const svg = document.getElementById('viewscreen');
+  const posEl = document.getElementById('pos');
+
+  const VIEW_W = 1600;
+  const VIEW_H = 900;
+  const WORLD_W = 16000;          // one full revolution of the panorama
+  const SCROLL_SPEED = 12;        // px per frame while arrow held
+  const SEAM_MARGIN = 120;        // feature footprints stay this far from boundaries
+  let cameraX = 0;                // monotonically advances; wrapped via modulo on render
+
+  const NS = 'http://www.w3.org/2000/svg';
+
+  // -------- random helpers --------
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const irand = (a, b) => Math.floor(rand(a, b + 1));
+  const pick = arr => arr[irand(0, arr.length - 1)];
+
+  const palettes = [
+    ['#1a3a52', '#2a5d7a', '#4f8aa8', '#a8c5d8', '#e8dcc4'],
+    ['#3b2a4a', '#6b4a7a', '#a87aa8', '#d8a8c4', '#f0d8e0'],
+    ['#1f3d2a', '#3d6b4a', '#7a9a6b', '#c4d8a8', '#f0e8c4'],
+    ['#4a2a1f', '#7a4a3d', '#a87a6b', '#d8b8a8', '#f0e0d4'],
+  ];
+
+  // -------- defs: gradient + the single world-content group --------
+  const defs = document.createElementNS(NS, 'defs');
+
+  const grad = document.createElementNS(NS, 'linearGradient');
+  grad.setAttribute('id', 'sky');
+  grad.setAttribute('x1', '0'); grad.setAttribute('y1', '0');
+  grad.setAttribute('x2', '0'); grad.setAttribute('y2', '1');
+  [['0%', '#0a0d12'], ['55%', '#1b2230'], ['100%', '#2a3447']].forEach(([o, c]) => {
+    const s = document.createElementNS(NS, 'stop');
+    s.setAttribute('offset', o);
+    s.setAttribute('stop-color', c);
+    grad.appendChild(s);
+  });
+  defs.appendChild(grad);
+
+  // worldContent lives inside <defs> so it doesn't render directly; <use> stamps it.
+  const worldContent = document.createElementNS(NS, 'g');
+  worldContent.setAttribute('id', 'worldContent');
+  defs.appendChild(worldContent);
+  svg.appendChild(defs);
+
+  // -------- world generation --------
+  // sky strip
+  const sky = document.createElementNS(NS, 'rect');
+  sky.setAttribute('x', 0); sky.setAttribute('y', 0);
+  sky.setAttribute('width', WORLD_W); sky.setAttribute('height', VIEW_H);
+  sky.setAttribute('fill', 'url(#sky)');
+  worldContent.appendChild(sky);
+
+  // stars — distributed across full width; cx near boundaries is fine because the
+  // two stamps butt against each other seamlessly at integer multiples of WORLD_W.
+  for (let i = 0; i < 600; i++) {
+    const c = document.createElementNS(NS, 'circle');
+    c.setAttribute('cx', rand(0, WORLD_W));
+    c.setAttribute('cy', rand(0, VIEW_H * 0.6));
+    c.setAttribute('r', rand(0.3, 1.4));
+    c.setAttribute('fill', '#e8dcc4');
+    c.setAttribute('opacity', rand(0.2, 0.9));
+    worldContent.appendChild(c);
+  }
+
+  // mountain ridges — must start AND end at y=yBase so the silhouette is continuous
+  // across the WORLD_W → 0 seam.
+  const ridgeLayer = (yBase, amp, step, fill, opacity) => {
+    let d = `M 0 ${VIEW_H} L 0 ${yBase}`;
+    let x = step * rand(0.6, 1.4);
+    while (x < WORLD_W - step * 1.5) {
+      const ny = yBase + rand(-amp, amp);
+      d += ` L ${x.toFixed(1)} ${ny.toFixed(1)}`;
+      x += step * rand(0.6, 1.4);
+    }
+    // anchor the right edge at the same yBase as the left edge
+    d += ` L ${WORLD_W} ${yBase} L ${WORLD_W} ${VIEW_H} Z`;
+    const path = document.createElementNS(NS, 'path');
+    path.setAttribute('d', d);
+    path.setAttribute('fill', fill);
+    path.setAttribute('opacity', opacity);
+    worldContent.appendChild(path);
+  };
+  ridgeLayer(VIEW_H * 0.55, 80, 90, '#1a3a52', 0.55);
+  ridgeLayer(VIEW_H * 0.65, 60, 70, '#142a3a', 0.7);
+  ridgeLayer(VIEW_H * 0.75, 40, 50, '#0d1a26', 0.9);
+
+  // scattered features. cx stays inside [SEAM_MARGIN, WORLD_W - SEAM_MARGIN] and each
+  // shape's footprint is bounded so nothing crosses the seam.
+  const features = 220;
+  for (let i = 0; i < features; i++) {
+    const palette = pick(palettes);
+    const cx = rand(SEAM_MARGIN, WORLD_W - SEAM_MARGIN);
+    const cy = rand(VIEW_H * 0.55, VIEW_H * 0.92);
+    const kind = irand(0, 3);
+
+    if (kind === 0) {
+      const sides = irand(3, 7);
+      const r = rand(15, 60);
+      let pts = '';
+      for (let s = 0; s < sides; s++) {
+        const a = (s / sides) * Math.PI * 2 + rand(-0.2, 0.2);
+        const rr = r * rand(0.7, 1.2);
+        pts += `${(cx + Math.cos(a) * rr).toFixed(1)},${(cy + Math.sin(a) * rr).toFixed(1)} `;
+      }
+      const p = document.createElementNS(NS, 'polygon');
+      p.setAttribute('points', pts.trim());
+      p.setAttribute('fill', pick(palette));
+      p.setAttribute('opacity', rand(0.35, 0.85));
+      worldContent.appendChild(p);
+    } else if (kind === 1) {
+      const baseR = rand(20, 70);
+      for (let k = 0; k < 4; k++) {
+        const c = document.createElementNS(NS, 'circle');
+        c.setAttribute('cx', cx);
+        c.setAttribute('cy', cy);
+        c.setAttribute('r', baseR + k * 6);
+        c.setAttribute('fill', 'none');
+        c.setAttribute('stroke', pick(palette));
+        c.setAttribute('stroke-width', rand(0.6, 1.8));
+        c.setAttribute('opacity', rand(0.25, 0.7));
+        worldContent.appendChild(c);
+      }
+    } else if (kind === 2) {
+      const g = document.createElementNS(NS, 'g');
+      const a = rand(-Math.PI / 3, Math.PI / 3);
+      const n = irand(4, 10);
+      for (let k = 0; k < n; k++) {
+        const len = rand(20, 90);
+        const ox = (k - n / 2) * 6;
+        const oy = (k - n / 2) * 2;
+        const x1 = cx + ox - Math.cos(a) * len / 2;
+        const y1 = cy + oy - Math.sin(a) * len / 2;
+        const x2 = cx + ox + Math.cos(a) * len / 2;
+        const y2 = cy + oy + Math.sin(a) * len / 2;
+        const line = document.createElementNS(NS, 'line');
+        line.setAttribute('x1', x1); line.setAttribute('y1', y1);
+        line.setAttribute('x2', x2); line.setAttribute('y2', y2);
+        line.setAttribute('stroke', pick(palette));
+        line.setAttribute('stroke-width', rand(0.7, 2.0));
+        line.setAttribute('opacity', rand(0.3, 0.85));
+        g.appendChild(line);
+      }
+      worldContent.appendChild(g);
+    } else {
+      // bezier squiggle — bounded so it never wanders past the seam margin.
+      // we generate offsets relative to cx,cy and clamp to a small box.
+      const p = document.createElementNS(NS, 'path');
+      const segs = irand(2, 4);
+      let dx = 0, dy = 0;
+      let d = `M ${cx.toFixed(1)} ${cy.toFixed(1)}`;
+      const clampStep = v => Math.max(-90, Math.min(90, v));
+      for (let k = 0; k < segs; k++) {
+        const c1x = clampStep(dx + rand(-40, 40));
+        const c1y = clampStep(dy + rand(-40, 40));
+        const c2x = clampStep(dx + rand(-40, 40));
+        const c2y = clampStep(dy + rand(-40, 40));
+        const ndx = clampStep(dx + rand(-50, 50));
+        const ndy = clampStep(dy + rand(-30, 30));
+        d += ` C ${(cx + c1x).toFixed(1)} ${(cy + c1y).toFixed(1)},`
+           + ` ${(cx + c2x).toFixed(1)} ${(cy + c2y).toFixed(1)},`
+           + ` ${(cx + ndx).toFixed(1)} ${(cy + ndy).toFixed(1)}`;
+        dx = ndx; dy = ndy;
+      }
+      p.setAttribute('d', d);
+      p.setAttribute('fill', 'none');
+      p.setAttribute('stroke', pick(palette));
+      p.setAttribute('stroke-width', rand(0.8, 2.2));
+      p.setAttribute('opacity', rand(0.4, 0.9));
+      worldContent.appendChild(p);
+    }
+  }
+
+  // distance markers — these repeat every WORLD_W, which visually confirms the period.
+  for (let x = 0; x < WORLD_W; x += 400) {
+    const tick = document.createElementNS(NS, 'line');
+    tick.setAttribute('x1', x); tick.setAttribute('y1', VIEW_H - 10);
+    tick.setAttribute('x2', x); tick.setAttribute('y2', VIEW_H);
+    tick.setAttribute('stroke', '#5b6573');
+    tick.setAttribute('stroke-width', 1);
+    worldContent.appendChild(tick);
+
+    const t = document.createElementNS(NS, 'text');
+    t.setAttribute('x', x + 4);
+    t.setAttribute('y', VIEW_H - 14);
+    t.setAttribute('font-family', 'monospace');
+    t.setAttribute('font-size', 11);
+    t.setAttribute('fill', '#5b6573');
+    t.textContent = x.toString();
+    worldContent.appendChild(t);
+  }
+
+  // -------- two stamps of the world side by side, wrapped in a translatable group --------
+  const worldWrap = document.createElementNS(NS, 'g');
+  const useA = document.createElementNS(NS, 'use');
+  useA.setAttribute('href', '#worldContent');
+  useA.setAttribute('x', 0);
+  worldWrap.appendChild(useA);
+  const useB = document.createElementNS(NS, 'use');
+  useB.setAttribute('href', '#worldContent');
+  useB.setAttribute('x', WORLD_W);
+  worldWrap.appendChild(useB);
+  svg.appendChild(worldWrap);
+
+  // -------- scrolling with seamless wrap --------
+  const updateView = () => {
+    // visible offset is camera mod WORLD_W. The two stamps cover the seam.
+    const visibleX = ((cameraX % WORLD_W) + WORLD_W) % WORLD_W;
+    worldWrap.setAttribute('transform', `translate(${-visibleX} 0)`);
+    posEl.textContent = `x=${Math.round(visibleX).toString().padStart(5, '0')}`;
+  };
+  updateView();
+
+  const heldKeys = new Set();
+  window.addEventListener('keydown', e => {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      heldKeys.add(e.key);
+      e.preventDefault();
+    } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      e.preventDefault();
+    }
+  });
+  window.addEventListener('keyup', e => {
+    heldKeys.delete(e.key);
+  });
+
+  const tick = () => {
+    let dx = 0;
+    if (heldKeys.has('ArrowLeft'))  dx -= SCROLL_SPEED;
+    if (heldKeys.has('ArrowRight')) dx += SCROLL_SPEED;
+    if (dx !== 0) {
+      cameraX += dx;
+      updateView();
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
