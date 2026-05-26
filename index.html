@@ -33,25 +33,85 @@
     color: #8b95a3;
     font-weight: 500;
   }
+
+  /* -------- CRT-style inline DISTANCE readout -------- */
+  #readout {
+    position: fixed;
+    top: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10;
+    pointer-events: none;
+    user-select: none;
+  }
+  #readout .display {
+    background:
+      radial-gradient(ellipse at center, #2a160c 0%, #160a04 70%, #0a0502 100%);
+    border-top: 1px solid #2a0e08;
+    border-left: 1px solid #2a0e08;
+    border-bottom: 1px solid #7a4a30;
+    border-right: 1px solid #7a4a30;
+    border-radius: 5px;
+    padding: 8px 22px 10px;
+    box-shadow: inset 0 3px 8px rgba(0, 0, 0, 0.9);
+    font-family: "Courier New", "Courier", monospace;
+    font-weight: 700;
+    line-height: 1;
+    color: #ffae5c;
+    text-shadow:
+      0 0 4px rgba(255, 140, 50, 0.95),
+      0 0 10px rgba(255, 110, 30, 0.6),
+      0 0 22px rgba(255, 90, 20, 0.35);
+    white-space: nowrap;
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+  }
+  #readout .heading {
+    font-size: 18px;
+    letter-spacing: 0.32em;
+    opacity: 0.85;
+  }
+  #readout .value {
+    font-size: 32px;
+    letter-spacing: 0.22em;
+  }
+  #readout .display.no-signal .value {
+    color: #6a3a20;
+    text-shadow: none;
+  }
 </style>
 </head>
 <body>
 <svg id="viewscreen" xmlns="http://www.w3.org/2000/svg"
      preserveAspectRatio="xMidYMid slice"
      viewBox="0 0 1600 900"></svg>
-<div id="hud"><b>&larr; &rarr;</b> scroll &nbsp;&nbsp; <span id="pos">x=0</span></div>
+
+<div id="readout">
+  <div class="display no-signal" id="display">
+    <span class="heading">DISTANCE:</span><span class="value" id="value">----</span>
+  </div>
+</div>
+
+<div id="hud"><b>&larr; &rarr;</b> pan &nbsp; <b>&uarr; &darr;</b> aim &nbsp;&nbsp; <span id="pos">x=0</span></div>
 
 <script>
 (() => {
   const svg = document.getElementById('viewscreen');
   const posEl = document.getElementById('pos');
+  const displayEl = document.getElementById('display');
+  const valueEl = document.getElementById('value');
 
   const VIEW_W = 1600;
   const VIEW_H = 900;
-  const WORLD_W = 16000;          // one full revolution of the panorama
-  const SCROLL_SPEED = 12;        // px per frame while arrow held
+  const WORLD_W = 8000;          // one full revolution of the panorama
+  const SCROLL_SPEED = 12;        // px per frame while horizontal arrow held
+  const AIM_SPEED = 6;            // px per frame while vertical arrow held
   const SEAM_MARGIN = 120;        // feature footprints stay this far from boundaries
+  const FINDER_MIN_Y = 80;        // reticle vertical bounds in screen coords
+  const FINDER_MAX_Y = VIEW_H - 40;
   let cameraX = 0;                // monotonically advances; wrapped via modulo on render
+  let finderY = VIEW_H * 0.55;    // reticle y in screen coords; reticle x is fixed at center
 
   const NS = 'http://www.w3.org/2000/svg';
 
@@ -235,6 +295,26 @@
     worldContent.appendChild(t);
   }
 
+  // -------- distance bands: each of the 3 mountain layers reads roughly its own value --------
+  // Y thresholds align with the ridge yBase values (495/585/675) and amplitudes used above.
+  // Sky (above the farthest ridge) and ground (below the closest ridge's main body) are silent.
+  const LAYERS = [
+    { yMin: 410, yMax: 555, base: 5400 },  // far ridge
+    { yMin: 555, yMax: 645, base: 3200 },  // mid ridge
+    { yMin: 645, yMax: 780, base: 1500 },  // near ridge
+  ];
+
+  const distanceAt = (wx, wy) => {
+    for (const L of LAYERS) {
+      if (wy >= L.yMin && wy < L.yMax) {
+        // tiny per-X variation so it feels like a live rangefinder, not a static label.
+        const jitter = Math.round(Math.sin(wx * 0.0007 + L.base * 0.001) * 25);
+        return L.base + jitter;
+      }
+    }
+    return null;
+  };
+
   // -------- two stamps of the world side by side, wrapped in a translatable group --------
   const worldWrap = document.createElementNS(NS, 'g');
   const useA = document.createElementNS(NS, 'use');
@@ -247,21 +327,71 @@
   worldWrap.appendChild(useB);
   svg.appendChild(worldWrap);
 
-  // -------- scrolling with seamless wrap --------
+  // -------- view-finder reticle (overlay; does not scroll horizontally) --------
+  // Reticle stays at screen-center X. Its Y is finderY (controlled by up/down arrows).
+  // World coordinates seen by the reticle: worldX = (cameraX + VIEW_W/2) mod WORLD_W,
+  // worldY = finderY.
+  const finder = document.createElementNS(NS, 'g');
+  finder.setAttribute('id', 'finder');
+  const reticleColor = '#fff2c8';
+  const lines = [
+    [-32, 0, -10, 0],  // left arm
+    [ 10, 0,  32, 0],  // right arm
+    [0, -32, 0, -10],  // top arm
+    [0,  10, 0,  32],  // bottom arm
+  ];
+  for (const [x1, y1, x2, y2] of lines) {
+    const ln = document.createElementNS(NS, 'line');
+    ln.setAttribute('x1', x1); ln.setAttribute('y1', y1);
+    ln.setAttribute('x2', x2); ln.setAttribute('y2', y2);
+    ln.setAttribute('stroke', reticleColor);
+    ln.setAttribute('stroke-width', 1.5);
+    ln.setAttribute('opacity', 0.92);
+    finder.appendChild(ln);
+  }
+  const ring = document.createElementNS(NS, 'circle');
+  ring.setAttribute('cx', 0); ring.setAttribute('cy', 0); ring.setAttribute('r', 14);
+  ring.setAttribute('fill', 'none');
+  ring.setAttribute('stroke', reticleColor);
+  ring.setAttribute('stroke-width', 1.2);
+  ring.setAttribute('opacity', 0.85);
+  finder.appendChild(ring);
+  const dot = document.createElementNS(NS, 'circle');
+  dot.setAttribute('cx', 0); dot.setAttribute('cy', 0); dot.setAttribute('r', 1.5);
+  dot.setAttribute('fill', reticleColor);
+  finder.appendChild(dot);
+  svg.appendChild(finder);
+
+  // -------- scrolling + aiming with seamless wrap --------
   const updateView = () => {
     // visible offset is camera mod WORLD_W. The two stamps cover the seam.
     const visibleX = ((cameraX % WORLD_W) + WORLD_W) % WORLD_W;
     worldWrap.setAttribute('transform', `translate(${-visibleX} 0)`);
-    posEl.textContent = `x=${Math.round(visibleX).toString().padStart(5, '0')}`;
+    finder.setAttribute('transform', `translate(${VIEW_W / 2} ${finderY})`);
+
+    // readout: which mountain-layer band is the reticle in?
+    const reticleWorldX = (visibleX + VIEW_W / 2) % WORLD_W;
+    const reticleWorldY = finderY;
+    const d = distanceAt(reticleWorldX, reticleWorldY);
+    if (d == null) {
+      valueEl.textContent = '----';
+      displayEl.classList.add('no-signal');
+    } else {
+      valueEl.textContent = String(d).padStart(4, '0');
+      displayEl.classList.remove('no-signal');
+    }
+
+    posEl.textContent =
+      `x=${Math.round(reticleWorldX).toString().padStart(5, '0')} ` +
+      `y=${Math.round(reticleWorldY).toString().padStart(3, '0')}`;
   };
   updateView();
 
   const heldKeys = new Set();
   window.addEventListener('keydown', e => {
-    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight'
+        || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       heldKeys.add(e.key);
-      e.preventDefault();
-    } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       e.preventDefault();
     }
   });
@@ -270,11 +400,14 @@
   });
 
   const tick = () => {
-    let dx = 0;
+    let dx = 0, dy = 0;
     if (heldKeys.has('ArrowLeft'))  dx -= SCROLL_SPEED;
     if (heldKeys.has('ArrowRight')) dx += SCROLL_SPEED;
-    if (dx !== 0) {
+    if (heldKeys.has('ArrowUp'))    dy -= AIM_SPEED;
+    if (heldKeys.has('ArrowDown'))  dy += AIM_SPEED;
+    if (dx !== 0 || dy !== 0) {
       cameraX += dx;
+      finderY = Math.max(FINDER_MIN_Y, Math.min(FINDER_MAX_Y, finderY + dy));
       updateView();
     }
     requestAnimationFrame(tick);
